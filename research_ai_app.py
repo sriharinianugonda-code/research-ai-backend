@@ -26,7 +26,7 @@ db = SQLAlchemy(app)
 # GROQ AI CONFIG — reads from Railway env var
 # ─────────────────────────────────────────
 
-GROQ_API_KEYS = [k.strip() for k in os.environ.get('GROQ_API_KEY', '').split(',') if k.strip()]
+GROQ_API_KEYS = [os.environ.get('GROQ_API_KEY', '')]
 GROQ_URL   = 'https://api.groq.com/openai/v1/chat/completions'
 GROQ_MODEL = 'llama-3.3-70b-versatile'
 MAX_PAPER_CHARS = 28000

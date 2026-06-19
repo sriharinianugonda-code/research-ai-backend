@@ -25,7 +25,7 @@ db = SQLAlchemy(app)
 # GROQ AI CONFIG — reads from Railway env var
 # ─────────────────────────────────────────
 
-GROQ_API_KEYS = [k.strip() for k in os.environ.get('GROQ_API_KEY', '').split(',') if k.strip()]
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
 GROQ_URL   = 'https://api.groq.com/openai/v1/chat/completions'
 GROQ_MODEL = 'llama-3.3-70b-versatile'
 MAX_PAPER_CHARS = 28000
@@ -42,45 +42,35 @@ class GroqError(Exception):
 
 
 def groq_chat(messages, max_tokens=1024, temperature=0.4):
-    """Calls Groq with multi-key fallback. Raises GroqError with the real
-    reason if every attempt fails (instead of silently returning None)."""
-    if not GROQ_API_KEYS:
+    """Single Groq API key. Raises GroqError with the real reason on failure."""
+    if not GROQ_API_KEY:
         raise GroqError(
-            'GROQ_API_KEY env var is empty — no keys were loaded. '
-            'Add GROQ_API_KEY in Railway > Variables (comma-separate multiple keys), then redeploy.')
-    last = ''
-    for key in GROQ_API_KEYS:
-        try:
-            resp = requests.post(
-                GROQ_URL,
-                headers={'Authorization': f'Bearer {key}',
-                         'Content-Type': 'application/json'},
-                json={
-                    'model': GROQ_MODEL,
-                    'messages': messages,
-                    'temperature': temperature,
-                    'max_tokens': max_tokens,
-                    'top_p': 0.9,
-                    'stream': False,
-                },
-                timeout=60,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get('choices', [])
-                if choices:
-                    return choices[0]['message']['content']
-                last = 'Groq returned 200 but no choices'
-            elif resp.status_code == 429:
-                last = 'Groq rate limit hit (429)'
-                continue
-            else:
-                last = f'Groq error {resp.status_code}: {resp.text[:300]}'
-                continue
-        except Exception as e:
-            last = f'Request to Groq failed: {e}'
-            continue
-    raise GroqError(last or 'All Groq attempts failed')
+            'GROQ_API_KEY env var is empty. Add it in Railway > Variables and redeploy.')
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={'Authorization': f'Bearer {GROQ_API_KEY}',
+                     'Content-Type': 'application/json'},
+            json={
+                'model': GROQ_MODEL,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+                'top_p': 0.9,
+                'stream': False,
+            },
+            timeout=60,
+        )
+    except Exception as e:
+        raise GroqError(f'Could not reach Groq: {e}')
+
+    if resp.status_code == 200:
+        data = resp.json()
+        choices = data.get('choices', [])
+        if choices:
+            return choices[0]['message']['content']
+        raise GroqError('Groq returned 200 but no choices')
+    raise GroqError(f'Groq error {resp.status_code}: {resp.text[:300]}')
 
 
 # ─────────────────────────────────────────
@@ -606,7 +596,7 @@ def get_dashboard(user_id):
 @app.route('/ai_health', methods=['GET'])
 def ai_health():
     """Open this in a browser to diagnose AI issues."""
-    info = {'keys_loaded': len(GROQ_API_KEYS), 'model': GROQ_MODEL}
+    info = {'key_present': bool(GROQ_API_KEY), 'model': GROQ_MODEL}
     try:
         txt = groq_chat([{'role': 'user', 'content': 'Reply with the word OK'}],
                         max_tokens=5)

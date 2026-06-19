@@ -7,6 +7,7 @@ import json
 import requests
 import pymysql
 from sqlalchemy.dialects.mysql import LONGTEXT
+import os
 pymysql.install_as_MySQLdb()
 
 app = Flask(__name__)

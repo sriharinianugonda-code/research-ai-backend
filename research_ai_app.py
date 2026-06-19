@@ -3,9 +3,8 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
-import json
 import os
-import requests
+import json
 import pymysql
 from sqlalchemy.dialects.mysql import LONGTEXT
 pymysql.install_as_MySQLdb()
@@ -13,74 +12,13 @@ pymysql.install_as_MySQLdb()
 app = Flask(__name__)
 CORS(app)
 
-# ✅ Reads from Railway environment variables
-db_url = os.environ.get('DATABASE_URL', '')
-app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+# Reads the DB URL from Railway env. Set DATABASE_URL in Railway > Variables to
+# your MySQL connection string, e.g. mysql://user:pass@host:port/dbname
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', '')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'research_ai_secret'
 
 db = SQLAlchemy(app)
-
-# ─────────────────────────────────────────
-# GROQ AI CONFIG — reads from Railway env var
-# ─────────────────────────────────────────
-
-GROQ_API_KEYS = [k.strip() for k in os.environ.get('GROQ_API_KEY', '').split(',') if k.strip()]
-GROQ_URL   = 'https://api.groq.com/openai/v1/chat/completions'
-GROQ_MODEL = 'llama-3.3-70b-versatile'
-MAX_PAPER_CHARS = 28000
-
-
-def _clip(text):
-    if text and len(text) > MAX_PAPER_CHARS:
-        return text[:MAX_PAPER_CHARS] + '\n\n[...truncated...]'
-    return text or ''
-
-
-class GroqError(Exception):
-    pass
-
-
-def groq_chat(messages, max_tokens=1024, temperature=0.4):
-    """Calls Groq with multi-key fallback. Raises GroqError with the real
-    reason if every attempt fails (instead of silently returning None)."""
-    if not GROQ_API_KEYS:
-        raise GroqError(
-            'GROQ_API_KEY env var is empty — no keys were loaded. '
-            'Add GROQ_API_KEY in Railway > Variables (comma-separate multiple keys), then redeploy.')
-    last = ''
-    for key in GROQ_API_KEYS:
-        try:
-            resp = requests.post(
-                GROQ_URL,
-                headers={'Authorization': f'Bearer {key}',
-                         'Content-Type': 'application/json'},
-                json={
-                    'model': GROQ_MODEL,
-                    'messages': messages,
-                    'temperature': temperature,
-                    'max_tokens': max_tokens,
-                    'top_p': 0.9,
-                    'stream': False,
-                },
-                timeout=60,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get('choices', [])
-                if choices:
-                    return choices[0]['message']['content']
-                last = 'Groq returned 200 but no choices'
-            elif resp.status_code == 429:
-                last = 'Groq rate limit hit (429)'
-                continue
-            else:
-                last = f'Groq error {resp.status_code}: {resp.text[:300]}'
-                continue
-        except Exception as e:
-            last = f'Request to Groq failed: {e}'
-            continue
-    raise GroqError(last or 'All Groq attempts failed')
 
 
 # ─────────────────────────────────────────
@@ -125,7 +63,7 @@ class ChatMessage(db.Model):
     id         = db.Column(db.Integer, primary_key=True, autoincrement=True)
     paper_id   = db.Column(db.Integer, db.ForeignKey('papers.id'), nullable=False)
     user_id    = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    role       = db.Column(db.String(10), nullable=False)
+    role       = db.Column(db.String(10), nullable=False)   # 'user' | 'ai'
     text       = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -148,9 +86,8 @@ class Note(db.Model):
 @app.route('/signup', methods=['POST'])
 def signup():
     try:
-        data     = request.get_json()
-        required = ['name', 'email', 'password']
-        if not data or not all(k in data for k in required):
+        data = request.get_json()
+        if not data or not all(k in data for k in ['name', 'email', 'password']):
             return jsonify({'error': 'Missing required fields'}), 400
         if User.query.filter_by(email=data['email']).first():
             return jsonify({'error': 'Email already registered'}), 409
@@ -161,8 +98,7 @@ def signup():
         )
         db.session.add(new_user)
         db.session.commit()
-        session = ActiveSession(email=new_user.email)
-        db.session.add(session)
+        db.session.add(ActiveSession(email=new_user.email))
         db.session.commit()
         return jsonify({'message': 'User registered successfully', 'user': {
             'id': new_user.id, 'name': new_user.name, 'email': new_user.email,
@@ -182,8 +118,7 @@ def login():
         user = User.query.filter_by(email=data['email']).first()
         if not user or not check_password_hash(user.password, data['password']):
             return jsonify({'error': 'Invalid credentials'}), 401
-        session = ActiveSession(email=user.email)
-        db.session.add(session)
+        db.session.add(ActiveSession(email=user.email))
         db.session.commit()
         return jsonify({'message': 'Login successful', 'user': {
             'id': user.id, 'name': user.name, 'email': user.email,
@@ -214,7 +149,7 @@ def get_current_user():
 @app.route('/logout', methods=['POST'])
 def logout():
     try:
-        data  = request.get_json()
+        data = request.get_json()
         email = data.get('email') if data else None
         if not email:
             return jsonify({'error': 'Email required'}), 400
@@ -297,7 +232,7 @@ def change_password(user_id):
 
 
 # ─────────────────────────────────────────
-# PAPERS + AI ANALYSIS
+# PAPERS  (storage only — AI happens in the Flutter app)
 # ─────────────────────────────────────────
 
 @app.route('/papers/<int:user_id>', methods=['GET'])
@@ -305,7 +240,7 @@ def get_papers(user_id):
     try:
         favorite = request.args.get('favorite')
         status   = request.args.get('status')
-        query    = Paper.query.filter_by(user_id=user_id)
+        query = Paper.query.filter_by(user_id=user_id)
         if favorite == 'true':
             query = query.filter_by(is_favorite=True)
         if status:
@@ -338,44 +273,24 @@ def get_paper_detail(paper_id):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/papers/analyze', methods=['POST'])
-def analyze_paper():
+@app.route('/papers', methods=['POST'])
+def save_paper():
+    """The Flutter app already extracted text and made the summary with Groq.
+    This just stores everything."""
     try:
-        data     = request.get_json()
-        required = ['user_id', 'file_name', 'content']
+        data = request.get_json()
+        required = ['user_id', 'file_name', 'title', 'content']
         if not data or not all(k in data for k in required):
             return jsonify({'error': 'Missing required fields'}), 400
-        content = data['content']
-        meta_raw = groq_chat([
-            {'role': 'system', 'content': 'You extract bibliographic metadata. Reply ONLY with raw JSON, no markdown.'},
-            {'role': 'user', 'content': 'From this paper return JSON: {"title":"...","authors":"First-author et al.","year":"YYYY"}. If unknown use "".\n\n' + _clip(content)},
-        ], max_tokens=200, temperature=0.0)
-        title, authors, year = '', '', ''
-        if meta_raw:
-            try:
-                clean   = meta_raw.replace('```json', '').replace('```', '').strip()
-                m       = json.loads(clean)
-                title   = m.get('title', '') or ''
-                authors = m.get('authors', '') or ''
-                year    = m.get('year', '') or ''
-            except Exception:
-                pass
-        if not title:
-            title = data['file_name'].rsplit('.', 1)[0]
-        summary = groq_chat([
-            {'role': 'system', 'content': 'You are ResearchAI. Explain papers in simple, clear language with no jargon.'},
-            {'role': 'user', 'content': "Summarize this paper in SIMPLE language with short sections: What it's about, Methods, Key findings, Why it matters, Limitations.\n\n" + _clip(content)},
-        ], max_tokens=1500)
-        if summary is None:
-            return jsonify({'error': 'AI is busy right now. Please try again.'}), 503
         paper = Paper(
             user_id=data['user_id'], file_name=data['file_name'],
-            title=title, authors=authors, year=year,
-            content=content, summary=summary,
+            title=data['title'], authors=data.get('authors', ''),
+            year=data.get('year', ''), content=data['content'],
+            summary=data.get('summary', ''),
         )
         db.session.add(paper)
         db.session.commit()
-        return jsonify({'message': 'Paper analyzed', 'paper': {
+        return jsonify({'message': 'Paper saved', 'paper': {
             'id': paper.id, 'file_name': paper.file_name, 'title': paper.title,
             'authors': paper.authors, 'year': paper.year, 'summary': paper.summary,
             'is_favorite': paper.is_favorite, 'status': paper.status
@@ -385,44 +300,19 @@ def analyze_paper():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/papers/<int:paper_id>/citations', methods=['GET'])
-def paper_citations(paper_id):
+@app.route('/papers/<int:paper_id>/citations', methods=['PUT'])
+def save_citations(paper_id):
+    """Store the IEEE citations the app generated, so they load instantly next time."""
     try:
+        data = request.get_json()
         p = Paper.query.get(paper_id)
         if not p:
             return jsonify({'error': 'Paper not found'}), 404
-        if p.citations:
-            return jsonify({'citations': p.citations}), 200
-        result = groq_chat([
-            {'role': 'system', 'content': 'You produce accurate IEEE-style reference lists.'},
-            {'role': 'user', 'content': 'Find the reference/bibliography entries and reformat them in IEEE style, numbered [1], [2], [3]. If none are found, write "No reference list detected." then suggest 3-5 relevant works under "Suggested related references (AI-generated, verify):". Output only the list.\n\n' + _clip(p.content)},
-        ], max_tokens=1800)
-        if result is None:
-            return jsonify({'error': 'AI is busy right now. Please try again.'}), 503
-        p.citations = result
+        p.citations = data.get('citations', '')
         db.session.commit()
-        return jsonify({'citations': result}), 200
+        return jsonify({'message': 'Citations saved'}), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/papers/<int:paper_id>/cite', methods=['POST'])
-def cite_paper(paper_id):
-    try:
-        data  = request.get_json()
-        style = data.get('style', 'IEEE') if data else 'IEEE'
-        p = Paper.query.get(paper_id)
-        if not p:
-            return jsonify({'error': 'Paper not found'}), 404
-        result = groq_chat([
-            {'role': 'system', 'content': f'You generate one accurate {style} citation for the paper.'},
-            {'role': 'user', 'content': f'Generate a single {style}-style citation for THIS paper (the document itself, not its references). Output only the citation text.\n\n' + _clip(p.content)},
-        ], max_tokens=400, temperature=0.1)
-        if result is None:
-            return jsonify({'error': 'AI is busy right now. Please try again.'}), 503
-        return jsonify({'style': style, 'citation': result.strip()}), 200
-    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
@@ -443,7 +333,7 @@ def toggle_favorite(paper_id):
 @app.route('/papers/<int:paper_id>/status', methods=['PUT'])
 def set_status(paper_id):
     try:
-        data   = request.get_json()
+        data = request.get_json()
         status = data.get('status')
         if status not in ('toRead', 'reading', 'completed'):
             return jsonify({'error': 'Invalid status'}), 400
@@ -474,7 +364,7 @@ def delete_paper(paper_id):
 
 
 # ─────────────────────────────────────────
-# CHAT WITH PAPER
+# CHAT (history storage only — answers come from Groq in the app)
 # ─────────────────────────────────────────
 
 @app.route('/papers/<int:paper_id>/chat', methods=['GET'])
@@ -483,42 +373,26 @@ def get_chat(paper_id):
         msgs = ChatMessage.query.filter_by(paper_id=paper_id)\
             .order_by(ChatMessage.created_at.asc()).all()
         return jsonify([{
-            'id': m.id, 'role': m.role, 'text': m.text,
-            'created_at': m.created_at.strftime('%d %b %Y %H:%M')
+            'id': m.id, 'role': m.role, 'text': m.text
         } for m in msgs]), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/papers/<int:paper_id>/chat', methods=['POST'])
-def ask_paper(paper_id):
+def save_chat(paper_id):
+    """Save one message. The app posts the user's question and the AI answer."""
     try:
-        data     = request.get_json()
-        question = (data.get('question') or '').strip() if data else ''
-        user_id  = data.get('user_id')
-        if not question:
-            return jsonify({'error': 'Question required'}), 400
-        p = Paper.query.get(paper_id)
-        if not p:
-            return jsonify({'error': 'Paper not found'}), 404
+        data = request.get_json()
+        role = data.get('role')
+        text = (data.get('text') or '').strip()
+        user_id = data.get('user_id')
+        if role not in ('user', 'ai') or not text:
+            return jsonify({'error': 'role (user|ai) and text required'}), 400
         db.session.add(ChatMessage(paper_id=paper_id, user_id=user_id,
-                                   role='user', text=question))
+                                   role=role, text=text))
         db.session.commit()
-        history = ChatMessage.query.filter_by(paper_id=paper_id)\
-            .order_by(ChatMessage.created_at.desc()).limit(8).all()
-        history = list(reversed(history))
-        messages = [{'role': 'system',
-                     'content': 'You are ResearchAI. Answer ONLY from the paper below. If the answer is not in it, say so and mark general info as "(general knowledge)".\n\n=== PAPER ===\n' + _clip(p.content) + '\n=== END ==='}]
-        for m in history:
-            messages.append({'role': 'user' if m.role == 'user' else 'assistant',
-                             'content': m.text})
-        answer = groq_chat(messages, max_tokens=1024)
-        if answer is None:
-            return jsonify({'error': 'AI is busy right now. Please try again.'}), 503
-        db.session.add(ChatMessage(paper_id=paper_id, user_id=user_id,
-                                   role='ai', text=answer))
-        db.session.commit()
-        return jsonify({'answer': answer}), 200
+        return jsonify({'message': 'Saved'}), 201
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -535,7 +409,7 @@ def get_notes(user_id):
             .order_by(Note.created_at.desc()).all()
         return jsonify([{
             'id': n.id, 'content': n.content, 'paper_title': n.paper_title,
-            'color': n.color, 'created_at': n.created_at.strftime('%d %b %Y')
+            'color': n.color
         } for n in notes]), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -544,9 +418,8 @@ def get_notes(user_id):
 @app.route('/notes', methods=['POST'])
 def add_note():
     try:
-        data     = request.get_json()
-        required = ['user_id', 'content']
-        if not data or not all(k in data for k in required):
+        data = request.get_json()
+        if not data or not all(k in data for k in ['user_id', 'content']):
             return jsonify({'error': 'Missing required fields'}), 400
         note = Note(
             user_id=data['user_id'], content=data['content'],
@@ -577,21 +450,21 @@ def delete_note(note_id):
 
 
 # ─────────────────────────────────────────
-# DASHBOARD
+# HOME DASHBOARD
 # ─────────────────────────────────────────
 
 @app.route('/dashboard/<int:user_id>', methods=['GET'])
 def get_dashboard(user_id):
     try:
-        all_papers  = Paper.query.filter_by(user_id=user_id).all()
-        recent      = Paper.query.filter_by(user_id=user_id)\
+        all_papers = Paper.query.filter_by(user_id=user_id).all()
+        recent = Paper.query.filter_by(user_id=user_id)\
             .order_by(Paper.created_at.desc()).limit(4).all()
         notes_count = Note.query.filter_by(user_id=user_id).count()
         return jsonify({
             'total_papers': len(all_papers),
-            'favorites':  sum(1 for p in all_papers if p.is_favorite),
-            'reading':    sum(1 for p in all_papers if p.status == 'reading'),
-            'completed':  sum(1 for p in all_papers if p.status == 'completed'),
+            'favorites': sum(1 for p in all_papers if p.is_favorite),
+            'reading': sum(1 for p in all_papers if p.status == 'reading'),
+            'completed': sum(1 for p in all_papers if p.status == 'completed'),
             'notes': notes_count,
             'recent_papers': [{
                 'id': p.id, 'title': p.title, 'authors': p.authors,
@@ -602,22 +475,7 @@ def get_dashboard(user_id):
         return jsonify({'error': str(e)}), 500
 
 
-
-@app.route('/ai_health', methods=['GET'])
-def ai_health():
-    """Open this in a browser to diagnose AI issues."""
-    info = {'keys_loaded': len(GROQ_API_KEYS), 'model': GROQ_MODEL}
-    try:
-        txt = groq_chat([{'role': 'user', 'content': 'Reply with the word OK'}],
-                        max_tokens=5)
-        info['ok'] = True
-        info['sample'] = txt
-    except Exception as e:
-        info['ok'] = False
-        info['error'] = str(e)
-    return jsonify(info), 200
-
-
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True, host='0.0.0.0', port=5000)

@@ -4,10 +4,10 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import json
+import os
 import requests
 import pymysql
 from sqlalchemy.dialects.mysql import LONGTEXT
-import os
 pymysql.install_as_MySQLdb()
 
 app = Flask(__name__)
@@ -19,14 +19,13 @@ app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'research_ai_secret'
 
-import os
 db = SQLAlchemy(app)
 
 # ─────────────────────────────────────────
 # GROQ AI CONFIG — reads from Railway env var
 # ─────────────────────────────────────────
 
-GROQ_API_KEYS = [os.environ.get('GROQ_API_KEY', '')]
+GROQ_API_KEYS = [k.strip() for k in os.environ.get('GROQ_API_KEY', '').split(',') if k.strip()]
 GROQ_URL   = 'https://api.groq.com/openai/v1/chat/completions'
 GROQ_MODEL = 'llama-3.3-70b-versatile'
 MAX_PAPER_CHARS = 28000
@@ -38,7 +37,18 @@ def _clip(text):
     return text or ''
 
 
+class GroqError(Exception):
+    pass
+
+
 def groq_chat(messages, max_tokens=1024, temperature=0.4):
+    """Calls Groq with multi-key fallback. Raises GroqError with the real
+    reason if every attempt fails (instead of silently returning None)."""
+    if not GROQ_API_KEYS:
+        raise GroqError(
+            'GROQ_API_KEY env var is empty — no keys were loaded. '
+            'Add GROQ_API_KEY in Railway > Variables (comma-separate multiple keys), then redeploy.')
+    last = ''
     for key in GROQ_API_KEYS:
         try:
             resp = requests.post(
@@ -60,13 +70,17 @@ def groq_chat(messages, max_tokens=1024, temperature=0.4):
                 choices = data.get('choices', [])
                 if choices:
                     return choices[0]['message']['content']
+                last = 'Groq returned 200 but no choices'
             elif resp.status_code == 429:
+                last = 'Groq rate limit hit (429)'
                 continue
             else:
+                last = f'Groq error {resp.status_code}: {resp.text[:300]}'
                 continue
-        except Exception:
+        except Exception as e:
+            last = f'Request to Groq failed: {e}'
             continue
-    return None
+    raise GroqError(last or 'All Groq attempts failed')
 
 
 # ─────────────────────────────────────────
@@ -586,6 +600,22 @@ def get_dashboard(user_id):
         }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/ai_health', methods=['GET'])
+def ai_health():
+    """Open this in a browser to diagnose AI issues."""
+    info = {'keys_loaded': len(GROQ_API_KEYS), 'model': GROQ_MODEL}
+    try:
+        txt = groq_chat([{'role': 'user', 'content': 'Reply with the word OK'}],
+                        max_tokens=5)
+        info['ok'] = True
+        info['sample'] = txt
+    except Exception as e:
+        info['ok'] = False
+        info['error'] = str(e)
+    return jsonify(info), 200
 
 
 if __name__ == '__main__':

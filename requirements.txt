@@ -6,4 +6,3 @@ werkzeug
 gunicorn
 cryptography
 requests
-os

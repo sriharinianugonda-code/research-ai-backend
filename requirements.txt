@@ -1,0 +1,8 @@
+flask
+flask-sqlalchemy
+flask-cors
+pymysql
+werkzeug
+gunicorn
+cryptography
+requests
